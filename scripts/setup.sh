@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-shot setup for the qwen36-27b-single-3090 stack.
+# One-shot setup for the qwen36-27b-single-5090 stack.
 #   - clones Sandermage/genesis-vllm-patches into ./patches/genesis
 #   - downloads Lorbus/Qwen3.6-27B-int4-AutoRound into $MODEL_DIR with
 #     SHA256 verification against HF x-linked-etag

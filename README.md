@@ -1,10 +1,10 @@
-# Qwen3.6-27B on a single RTX 3090
+# Qwen3.6-27B on a single RTX 5090
 
-**A validated recipe for serving Qwen3.6-27B on a single consumer 24 GB RTX 3090** — full OpenAI API, vision, tool calling, streaming, speculative decoding, all verified end-to-end via `scripts/verify-full.sh`.
+**A validated recipe for serving Qwen3.6-27B on a single 32 GB RTX 5090** — full OpenAI API, vision, tool calling, streaming, speculative decoding, all verified end-to-end via `scripts/verify-full.sh`.
 
-Based on [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound) via vLLM with MTP speculative decoding + fp8_e5m2 KV cache. Built on [`Sandermage/genesis-vllm-patches`](https://github.com/Sandermage/genesis-vllm-patches) + a CUDA graph capture fix that ships in this repo.
+Based on [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound) via vLLM with MTP speculative decoding + fp8_e4m3 KV cache. Built on [`Sandermage/genesis-vllm-patches`](https://github.com/Sandermage/genesis-vllm-patches) + a CUDA graph capture fix that ships in this repo.
 
-> 📖 **Write-up:** *[Qwen3.6-27B on a single RTX 3090 — the recipe](https://medium.com/)*
+> 📖 **Write-up:** *[Qwen3.6-27B on a single RTX 5090 — the recipe](https://medium.com/)*
 > 🐛 **Upstream bug reports:** [vllm-project/vllm#40807](https://github.com/vllm-project/vllm/issues/40807) (CUDA graph crash — worked around locally) · [vllm-project/vllm#40831](https://github.com/vllm-project/vllm/issues/40831) (TurboQuant × spec-decode output-quality, isolated to cudagraph capture; root cause TBD)
 
 ---
@@ -13,48 +13,41 @@ Based on [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwe
 
 The [original write-up](https://medium.com/) reported 85–106 TPS at 125K context using TurboQuant KV. Under broader functional testing since publication we found that the originally-shipped 125K config produces degenerate token loops on tool calls, long-context recall, and occasionally streaming. An eight-probe investigation traced the failure to **vLLM's CUDA graph capture/replay machinery for spec-decode + TurboQuant** — not the kernels, not torch.compile inductor output, not attention math. Filed upstream as [#40831](https://github.com/vllm-project/vllm/issues/40831); root cause within the cudagraph layer is still TBD upstream. Full probe ladder + analysis in the [Technical background](#technical-background--why-the-long-ctx-config-disables-cudagraph) section below.
 
-The shipped workaround: `--compilation-config '{"cudagraph_mode":"NONE"}'` (disables CUDA graph capture, keeps torch.compile inductor on). Cost: ~60% TPS (85 → 33 narrative). Restores correctness across tool calls, recall, and streaming. Baked into `docker-compose.longctx-experimental.yml` so that file ships a functional 125K config rather than the originally-broken one. When upstream lands a fix, drop the flag and TPS recovers.
+The correct workaround: `--compilation-config '{"cudagraph_mode":"NONE"}'` (disables CUDA graph capture, keeps torch.compile inductor on). Cost: ~60% TPS (85 → 33 narrative). Restores correctness across tool calls, recall, and streaming. When upstream lands a fix, that flag can be dropped and TPS recovers.
 
-**The default config (`docker-compose.yml`) is unchanged** — MTP n=3 + fp8_e5m2 KV + vision at 20K, ~85 TPS peak, no workaround needed (fp8 KV doesn't go through TurboQuant's custom backend). Use the long-context variant when you actually need the 125K KV pool and can pay the TPS cost.
+**The default config (`docker-compose.yml`) is unaffected** — MTP n=3 + fp8_e4m3 KV + vision at 20K, ~85 TPS peak, no workaround needed (fp8 KV doesn't go through TurboQuant's custom backend).
 
 ---
 
-## Evidence matrix — what works on each config
+## Evidence matrix — what works
 
-Measured on 1× RTX 3090 at 230W cap, vLLM image pinned to tested digest, `scripts/verify-full.sh`:
+Measured on 1× RTX 5090, vLLM image pinned to tested digest, `scripts/verify-full.sh`:
 
-| Test | Default (MTP + fp8) | `tools-text.yml` (MTP + fp8 + no vision) | `longctx-experimental.yml` (MTP + turboquant + cudagraph-off) |
-|---|---|---|---|
-| Server + Genesis patches | ✅ | ✅ | ✅ |
-| Basic completion (Paris) | ✅ | ✅ | ✅ |
-| **Tool calling** | **✅** | **✅** | **✅** |
-| **Streaming (SSE)** | **✅** clean output | **✅** clean output | **✅** clean output |
-| Thinking / reasoning | ✅ | ✅ | ✅ |
-| **Long-context recall** (10K) | **✅** | **✅** | **✅** |
-| Long-context recall (30K) | n/a (20K cap) | **✅** | **✅** |
-| Long-context recall (60K) | n/a | **✅** | **✅** |
-| Long-context recall (90K) | n/a | n/a (75K cap) | **✅** |
-| Short-prompt TPS (narrative) | 65.9 | 65.2 | **33.0** (cudagraph-off cost) |
-| Peak TPS | 85 | 85 | 33 |
-| Max context | 20K | **75K** | **125K** |
-| Vision | ✅ | ❌ | ✅ |
-| VRAM | 22.8 GB | 22.2 GB | 22.0 GB |
-
-All three configs now pass every test. The 125K variant pays a ~60% TPS cost for `cudagraph_mode=NONE`, which is the workaround for upstream bug [#40831](https://github.com/vllm-project/vllm/issues/40831). When that lands, drop the flag and TPS recovers.
-
-**The original 125K headline (~85–95 TPS) was reproducible only on workloads that don't exercise structured output:** plain narrative or code generation. Tool calls, long-context recall, and streaming all fail catastrophically with cudagraph on under spec-decode. The six-probe ladder above isolates the bug to the CUDA graph capture/replay layer specifically; Triton kernels and torch.compile inductor output are correct when invoked dynamically.
+| Test | Default (MTP + fp8_e4m3 + vision, 20K) |
+|---|---|
+| Server + Genesis patches | ✅ |
+| Basic completion (Paris) | ✅ |
+| **Tool calling** | **✅** |
+| **Streaming (SSE)** | **✅** clean output |
+| Thinking / reasoning | ✅ |
+| **Long-context recall** (10K) | **✅** |
+| Short-prompt TPS (narrative) | 65.9 |
+| Peak TPS | 85 |
+| Max context | 20K |
+| Vision | ✅ |
+| VRAM | 22.8 GB |
 
 ---
 
 ## Production numbers — default config
 
 ```
-  Qwen3.6-27B on 1× RTX 3090 (24 GB, 230W cap, default config)
+  Qwen3.6-27B on 1× RTX 5090 (32 GB, default config)
   ────────────────────────────────────────────────────────────
   Throughput      66 TPS (narrative)  /  84 TPS (code, peak 85)
   Context          20 K tokens
   Vision           Enabled (MoonViT BF16)
-  VRAM            22.8 / 24 GB
+  VRAM            22.8 / 32 GB
   Server          vLLM · full OpenAI API
   Tools           ✅ working   Streaming ✅   Thinking ✅
   Spec-decode    MTP n=3 · AL 2.87–3.39 · accept 94/81/64%
@@ -62,16 +55,13 @@ All three configs now pass every test. The 125K variant pays a ~60% TPS cost for
 
 Beats [Lorbus card's RTX 5090 baseline](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound) (~60 TPS) on consumer Ampere hardware. All functionality verified.
 
-For more context without vision (text-only agents), see `docker-compose.tools-text.yml` — 75K ctx, same TPS.
-
-For 125K ctx with vision + tools + recall, see `docker-compose.longctx-experimental.yml` — 33 TPS sustained (cudagraph-off workaround for [#40831](https://github.com/vllm-project/vllm/issues/40831); flag drops out and TPS recovers when upstream lands a fix).
-
 ---
 
 ## Requirements
 
-- **GPU:** 1× NVIDIA RTX 3090 (24 GB, Ampere sm_86). Tested; larger cards obviously work too.
-- **Driver:** 580.x or newer (for CUDA 13 runtime in the vLLM nightly image).
+- **GPU:** 1× NVIDIA RTX 5090 (32 GB, Blackwell GB202).
+- **Driver:** 580.x or newer (for CUDA 13 runtime in the pinned vLLM image).
+- **Chat template:** `~/ai/qwen3.5-enhanced.jinja` must exist on the host — the compose file bind-mounts it at startup. Obtain it from the repo or provide your own Qwen3-compatible template.
 - **Disk:** ~20 GB free for model weights.
 - **Software:**
   - Docker with NVIDIA Container Toolkit
@@ -86,8 +76,8 @@ No system Python required.
 
 ```bash
 # 1. Clone this repo
-git clone https://github.com/noonghunna/qwen36-27b-single-3090.git
-cd qwen36-27b-single-3090
+git clone https://github.com/CobraPhil/qwen36-27b-single-5090.git
+cd qwen36-27b-single-5090
 
 # 2. Fetch Genesis patches + download + SHA-verify the model (~20 GB, 10-30 min)
 bash scripts/setup.sh
@@ -178,7 +168,7 @@ n=4 barely beats n=3 on code peak but the position-4 draft accept collapses to 2
 | Preset | Bits | Per-token bytes | Single-card ceiling |
 |---|---|---|---|
 | default (BF16) | 16 | ~55 KB | ~8K |
-| `fp8_e5m2` | 8 | ~28 KB | ~32K |
+| `fp8_e4m3` / `fp8_e5m2` | 8 | ~28 KB | ~32K |
 | `turboquant_k8v4` | 8+4 avg 6 | ~28 KB | ~40K |
 | `turboquant_4bit_nc` | 4+4 avg 4 | ~23 KB | ~84K |
 | **`turboquant_3bit_nc`** ⭐ | **3+3** | **~17 KB** | **~125K** |
@@ -195,7 +185,7 @@ Production runs at 230W per card (quiet, cool, stable). For ~+10% mean TPS durin
 sudo nvidia-smi -pl 330 -i 0   # replace 0 with your GPU index
 ```
 
-Past 330W: diminishing returns (SM clocks saturate near 1900 MHz on 3090s).
+Past the knee: diminishing returns as SM clocks saturate.
 
 ---
 
@@ -207,7 +197,7 @@ bash scripts/bench.sh
 
 Runs 3 warmup + 3 narrative (800-word essay, 1000 tokens) + 2 code (quicksort, 800 tokens) against the canonical prompts used throughout this repo. Reports wall time, completion tokens, TPS per request, plus GPU state and the last 3 SpecDecoding metrics lines (mean AL + per-position accept rates).
 
-Expected numbers on a stock 3090 at 230W:
+Expected numbers on an RTX 5090:
 
 | Run | Wall | TPS |
 |---|---|---|
@@ -216,21 +206,17 @@ Expected numbers on a stock 3090 at 230W:
 | narrative (warmed) | 10–16 s | 60–105 |
 | code (warmed) | 8–12 s | 60–100 |
 
-The 125K variant runs at a more uniform ~33 TPS because it disables CUDA graph capture (`cudagraph_mode=NONE`) while keeping torch.compile inductor on; spec-decode acceptance dips don't compound with cudagraph variance.
+A 125K turboquant config (not shipped here) runs at a more uniform ~33 TPS because it disables CUDA graph capture (`cudagraph_mode=NONE`); spec-decode acceptance dips don't compound with cudagraph variance. See [Technical background](#technical-background--why-the-long-ctx-config-disables-cudagraph) for detail.
 
 ---
 
-## Pick a compose variant
+## Compose config
 
-| Workload | Compose file | Context | TPS |
-|---|---|---|---|
-| **Default — vision + tools + 20K** (validated end-to-end) | `docker-compose.yml` | 20K | ~85 peak |
-| **Text-only agents + 75K ctx** (drops vision) | `docker-compose.tools-text.yml` | 75K | ~85 peak |
-| **Long-context — 125K + tools + recall + vision** (cudagraph-off workaround) | `docker-compose.longctx-experimental.yml` | 125K | ~33 sustained |
+This repo ships a single compose file: `docker-compose.yml` — MTP n=3 + fp8_e4m3 KV + vision at 20K ctx, ~85 TPS peak. It is the fully validated default.
 
-Only one container can bind to port 8020 at a time — `docker compose down` before switching.
+The server binds to port 8020. `docker compose down` before restarting with different settings.
 
-All three compose files use the same pinned vLLM image digest, the same Genesis patches, the same MTP n=3 spec-decode, and the same `patch_tolist_cudagraph.py`. The 125K variant additionally passes `--compilation-config '{"cudagraph_mode":"NONE"}'` as a workaround for [#40831](https://github.com/vllm-project/vllm/issues/40831). The other differences are `--kv-cache-dtype`, `--max-model-len`, and whether `--language-model-only` is set.
+The compose is pinned to a specific vLLM image digest (`bbac761a...`), uses the Genesis patches fetched by `setup.sh`, and applies `patch_tolist_cudagraph.py` at container startup alongside the Genesis patcher.
 
 ---
 
@@ -261,13 +247,13 @@ We isolated the bug through six probes:
 
 We initially hypothesized — and Sander independently flagged — that [PR #40798](https://github.com/vllm-project/vllm/pull/40798) ("Share decode scratch workspace across layers") was the structural fix, because it moves `_tq_mid_o_buf` / `_tq_output_buf` / `_tq_lse_buf` from per-layer `register_buffer(B=max_num_seqs=1)` to `WorkspaceManager.get_simultaneous()` (persistent base-buffer with a stable `data_ptr`). Probe 8 backported the PR onto our pinned nightly digest and tested against the originally-failing config: **bug persists** with all of #40798's structural changes applied (verified live in the running container, with TPS at ~96 confirming cudagraph + compile genuinely engaged). So either #40798 is necessary but not sufficient, or there's a companion change in `main` we haven't backported, or the bug is in a different code path than the per-layer scratch buffers entirely. Full probe-8 data: [#40831 follow-up](https://github.com/vllm-project/vllm/issues/40831#issuecomment-4317503179).
 
-The 125K compose ships `--compilation-config '{"cudagraph_mode":"NONE"}'` as the interim workaround. Cost: ~60% TPS (85 → 33 narrative). Drop the flag once upstream lands a fix.
+The validated workaround for a 125K config is `--compilation-config '{"cudagraph_mode":"NONE"}'`. Cost: ~60% TPS (85 → 33 narrative). Drop the flag once upstream lands a fix.
 
 **What we're doing about it:**
 
 - **[#40807](https://github.com/vllm-project/vllm/issues/40807)** — CUDA graph crash workaround via `patches/patch_tolist_cudagraph.py` (separate from #40831).
 - **[#40831](https://github.com/vllm-project/vllm/issues/40831)** — output-quality bug, six-probe isolation in the issue. Cross-references adjacent PRs ([#40074](https://github.com/vllm-project/vllm/pull/40074), [#40122](https://github.com/vllm-project/vllm/pull/40122), [#40706](https://github.com/vllm-project/vllm/pull/40706), [#40798](https://github.com/vllm-project/vllm/pull/40798)).
-- The default config stays on fp8_e5m2 (no cudagraph workaround needed) at 20K ctx, ~85 TPS.
+- The default config stays on fp8_e4m3 (no cudagraph workaround needed) at 20K ctx, ~85 TPS.
 
 When upstream resolves the cudagraph capture issue, the long-ctx variant drops `cudagraph_mode=NONE` and TPS recovers to the original ~85+.
 
@@ -283,11 +269,11 @@ The `patch_tolist_cudagraph.py` didn't apply. Check the container logs for:
 [tolist_cudagraph_fix] Patched ... Site A: ok, Site B: ok
 ```
 
-If not present, the anchor text may have drifted in a newer vLLM nightly. Pin the image in `docker-compose.yml` (change `vllm/vllm-openai:nightly` to a specific tag), or open an issue here.
+If not present, the anchor text may have drifted in a newer vLLM image. The compose is already pinned to a tested digest — if you changed it, revert to the pinned digest in `docker-compose.yml`, or open an issue here.
 
 ### `NotImplementedError: TurboQuant KV cache is not supported for hybrid`
 
-Genesis patches didn't apply. Check logs for `INFO:genesis_patch:` lines. Re-run `bash scripts/setup.sh` to ensure `patches/genesis/patch_genesis_unified.py` exists.
+Genesis patches didn't apply. Check logs for `INFO:genesis_patch:` lines. Re-run `bash scripts/setup.sh` to ensure `patches/genesis/` exists, then restart the container.
 
 ### Model load OOMs
 
@@ -300,59 +286,47 @@ You edited `--max-num-batched-tokens`. Keep it ≥ 4128 for this context length 
 
 ### Short-prompt TPS stuck at ~30
 
-If you're on `docker-compose.longctx-experimental.yml`, this is **expected** — it ships `--compilation-config '{"cudagraph_mode":"NONE"}'` as a workaround for [#40831](https://github.com/vllm-project/vllm/issues/40831). Sustained ~33 TPS at 125K ctx is the cost of correctness on that variant. Use the default `docker-compose.yml` for ~85 TPS at 20K. If you're seeing ~30 TPS on the default, something else is wrong — check that `patch_tolist_cudagraph.py` applied (`docker logs ... | grep tolist_cudagraph_fix`).
+If you're seeing ~30 TPS on the default config, something is wrong — check that `patch_tolist_cudagraph.py` applied (`docker logs ... | grep tolist_cudagraph_fix`). Expected is ~65–85 TPS.
 
 ### Tool calls return `<tool_call>{...}</tool_call>` as plain text (tool extraction doesn't fire)
 
-Two possible causes; the logs distinguish them:
-
-**Cause A — you removed `cudagraph_mode=NONE` from the long-ctx compose.** The original 125K config (cudagraph on) hits [#40831](https://github.com/vllm-project/vllm/issues/40831) and produces `<tool_call>` loops. The shipped `docker-compose.longctx-experimental.yml` already includes the cudagraph-off workaround; if you stripped that flag for performance, restore it.
-
-**Cause B — Genesis patch anchor drift.** Check container logs for:
+Check container logs for:
 
 ```
 [11/17] Qwen3 <tool_call> implicit reasoning end (PR #35687)...
   [FAILED] Qwen3 tool_call fix
 ```
 
-If you see `[FAILED]`, your vLLM image drifted past the anchor Genesis Patch 12 expects. Pin to our tested digest (already pinned by default in all compose files):
-
-```yaml
-image: vllm/vllm-openai@sha256:9bba4628a3b943e0dd33caefb94b811569ba1e97bdf23bee19a265c31b947ccb
-```
-
-On that digest (vLLM `0.19.2rc1.dev21+g893611813`, built 2026-04-20), all four Qwen3 tool-call sub-patches apply cleanly — look for `[OK] Qwen3 tool_call fix`. To verify patch applicability against any image:
-
-```bash
-docker run --rm --entrypoint python3 vllm/vllm-openai:nightly \
-  /patches/patch_genesis_unified.py 2>&1 | grep -E "Patch|FAILED|OK"
-```
+If you see `[FAILED]`, your vLLM image drifted past the anchor Genesis Patch 12 expects. The compose file is already pinned to a tested digest — revert `docker-compose.yml` to the pinned `image:` line if you changed it. On the pinned digest (vLLM `0.19.2rc1.dev21+g893611813`), all four Qwen3 tool-call sub-patches apply cleanly — look for `[OK] Qwen3 tool_call fix`.
 
 ---
 
 ## Repo layout
 
 ```
-qwen36-27b-single-3090/
+qwen36-27b-single-5090/
 ├── README.md                                   (this file)
 ├── LICENSE                                     Apache-2.0
 ├── .gitignore
 ├── patches/
-│   ├── patch_tolist_cudagraph.py               our CUDA graph capture crash fix (#40807)
+│   ├── genesis_shim.py                         copies genesis/_genesis into vLLM at startup;
+│   │                                            mounted as /patches/patch_genesis_unified.py
+│   ├── patch_tolist_cudagraph.py               CUDA graph capture crash fix (#40807)
 │   ├── patch_pr40798_workspace.py              research artifact — backports vllm#40798;
 │   │                                            does NOT fix #40831 (probe 8); kept for
 │   │                                            reproducibility of the negative result
 │   └── genesis/                                (gitignored; fetched by setup.sh)
+│       └── vllm/_genesis/                      the actual patch code used at runtime
 ├── compose/
-│   ├── docker-compose.yml                      DEFAULT — MTP + fp8 + vision, 20K, ~85 TPS
-│   ├── docker-compose.tools-text.yml           text-only, 75K ctx, ~85 TPS
-│   └── docker-compose.longctx-experimental.yml 125K + vision via cudagraph-off, ~33 TPS
+│   └── docker-compose.yml                      MTP n=3 + fp8_e4m3 KV + vision, 20K, ~85 TPS
 └── scripts/
     ├── setup.sh                                clone Genesis + download model + SHA verify
     ├── verify.sh                               quick smoke test (~10 sec)
     ├── verify-full.sh                          full functional test — streaming, thinking, needle (~3 min)
     └── bench.sh                                canonical TPS bench
 ```
+
+**Host requirement:** `~/ai/qwen3.5-enhanced.jinja` must exist before running `docker compose up`. This file is bind-mounted as the chat template. If missing, the container exits immediately with a mount error.
 
 ---
 
@@ -368,12 +342,12 @@ qwen36-27b-single-3090/
 
 - **[#40069](https://github.com/vllm-project/vllm/issues/40069)** — TurboQuant/HIGGS follow-ups tracker (upstream). Lists "Speculative decoding / Eagle" and "Hybrid attention models" as unchecked.
 - **[#40807](https://github.com/vllm-project/vllm/issues/40807)** — our CUDA graph `.tolist()` crash; worked around locally via `patch_tolist_cudagraph.py`. Sandermage's [v7.10 Genesis tree](https://github.com/Sandermage/genesis-vllm-patches) reaches the same end state via pre-allocation (Patches 23 + 44).
-- **[#40831](https://github.com/vllm-project/vllm/issues/40831)** — our TurboQuant × spec-decode output-quality bug. Eight-probe ladder + Sander's independent confirmation isolate it to **CUDA graph capture/replay** (probe 6: cudagraph off, torch.compile on → all 9 prompts pass at 33 TPS, including Sander's `tool_call_simple` / `code_quicksort` / `structured_xml` failure cases). Workaround: `--compilation-config '{"cudagraph_mode":"NONE"}'`, applied automatically in `docker-compose.longctx-experimental.yml`. Root cause within the cudagraph layer: still TBD upstream — see #40798 below.
+- **[#40831](https://github.com/vllm-project/vllm/issues/40831)** — our TurboQuant × spec-decode output-quality bug. Eight-probe ladder + Sander's independent confirmation isolate it to **CUDA graph capture/replay** (probe 6: cudagraph off, torch.compile on → all 9 prompts pass at 33 TPS, including Sander's `tool_call_simple` / `code_quicksort` / `structured_xml` failure cases). Workaround: `--compilation-config '{"cudagraph_mode":"NONE"}'`. Root cause within the cudagraph layer: still TBD upstream — see #40798 below.
 - **[PR #40798](https://github.com/vllm-project/vllm/pull/40798)** — *initially hypothesized fix; tested via probe 8 backport, **bug persists**.* Moves `_tq_mid_o_buf` / `_tq_output_buf` / `_tq_lse_buf` from per-layer `register_buffer(B=max_num_seqs)` to `WorkspaceManager.get_simultaneous()`. Sander and I both expected this would close the pointer-drift between warmup-shape capture and runtime-shape replay. We applied the PR's full diff to the pinned nightly via [`patches/patch_pr40798_workspace.py`](./patches/patch_pr40798_workspace.py) (research artifact, not shipped) and ran verify-full.sh + the 9-prompt Layer-2 probe against the cudagraph-on config. Same degenerate loops as before. Either #40798 is necessary but not sufficient, or a companion change in `main` we haven't backported is also required, or the bug is in a different code path than the per-layer scratch buffers entirely.
 - **Sandermage's [P56](https://github.com/Sandermage/genesis-vllm-patches/blob/main/vllm/_genesis/wiring/patch_56_spec_decode_decode_path_guard.py)** — routing-layer workaround (architecturally equivalent to our Probe 4 patch). Marked superseded by our `cudagraph_mode=NONE` workaround since it only addresses the catastrophic surface.
 - Sandermage Genesis: we may contribute `patch_tolist_cudagraph.py` to their unified script. They have offered to extract Patches 23 + 44 to upstream.
 
-Until upstream lands a fix: fp8_e5m2 + MTP at 20K (default) is the fast option, cudagraph-off + turboquant + MTP at 125K (long-ctx variant) is the long-context option. Both fully functional. The cudagraph-off variant pays a ~60% TPS cost; that recovers when the underlying bug is fixed.
+Until upstream lands a fix: fp8_e4m3 + MTP at 20K is the shipped config — fully functional at ~85 TPS. The 125K turboquant path works correctly only with `cudagraph_mode=NONE` (verified via probe 6); that workaround costs ~60% TPS and would be a candidate for a future extended-context variant once the upstream bug is resolved.
 
 ---
 

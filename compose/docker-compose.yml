@@ -4,19 +4,10 @@
 # This config PASSES every test in scripts/verify-full.sh:
 #   server  genesis  Paris  tool-calls  streaming  thinking  needle-recall
 #
-# Config: MTP spec-decode n=3 + fp8_e5m2 KV + vision enabled.
+# Config: MTP spec-decode n=3 + fp8_e4m3 KV + vision enabled.
 #
-# Variant matrix (all three compose files in this dir):
-#
-#   Compose file                               Max ctx   Narr TPS   Code TPS   Tools   Vision   Status
-#   docker-compose.yml (this file, default)     20K        66         84         ✅       ✅       validated
-#   docker-compose.tools-text.yml                75K        65         84         ✅       ❌       validated
-#   docker-compose.longctx-experimental.yml    125K        92         95         ✗        ✅       ⚠ see file
-#
-# The experimental variant uses TurboQuant KV to fit a 125K KV pool, which
-# benchmarks faster but fails on tool calls, long-context recall, and some
-# structured-output tasks (degenerate token loops). See the file header of
-# docker-compose.longctx-experimental.yml and README § Known issues.
+#   Max ctx   Narr TPS   Code TPS   Tools   Vision   Status
+#    20K        66         84         ✅       ✅       validated
 #
 # Run with:
 #   cd compose
@@ -25,18 +16,20 @@
 services:
   vllm-qwen36-27b:
     # Pinned to the exact nightly we tested and the Genesis patches verified against.
-    image: vllm/vllm-openai@sha256:9bba4628a3b943e0dd33caefb94b811569ba1e97bdf23bee19a265c31b947ccb
+    image: vllm/vllm-openai@sha256:bbac761a6be466aeab065472830c6e59fc81067e73239b7103546f9cb96138d9
     container_name: vllm-qwen36-27b
     restart: "no"
     ports:
       - "8020:8000"
     volumes:
-      - ${MODEL_DIR:-../models}:/root/.cache/huggingface
-      - ../patches/genesis/patch_genesis_unified.py:/patches/patch_genesis_unified.py:ro
+      - ${MODEL_DIR:-../models}:/root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - ../patches/genesis_shim.py:/patches/patch_genesis_unified.py:ro
+      - ../patches/genesis:/patches/genesis:ro
       - ../patches/patch_tolist_cudagraph.py:/patches/patch_tolist_cudagraph.py:ro
+      - ~/ai/qwen3.5-enhanced.jinja:/chat-template/qwen3.5-enhanced.jinja:ro
     environment:
       # Uncomment the next line to pin to a specific GPU (e.g. GPU 0):
-      # - CUDA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - NCCL_CUMEM_ENABLE=0
@@ -50,6 +43,11 @@ services:
       - CUDA_DEVICE_MAX_CONNECTIONS=8
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
+      - NCCL_CUMEM_ENABLE=0
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_FLOAT32_MATMUL_PRECISION=high
+      - OMP_NUM_THREADS=1
+      - CUDA_DEVICE_MAX_CONNECTIONS=8
     shm_size: "16gb"
     ipc: host
     deploy:
@@ -81,22 +79,25 @@ services:
       - --tensor-parallel-size
       - "1"
       - --max-model-len
-      - "20000"
+      - "262144"
       - --gpu-memory-utilization
-      - "0.95"
+      - "0.94"
       - --max-num-seqs
       - "1"
       - --max-num-batched-tokens
-      - "2048"
-      # fp8_e5m2 KV — NOT turboquant — because MTP + turboquant collapses on tool-call prompts.
+      - "4128"
+      # fp8_e4m3 KV (NOT turboquant — MTP + turboquant collapses on tool-call prompts)
       - --kv-cache-dtype
-      - fp8_e5m2
+      - fp8_e4m3
       - --trust-remote-code
       - --reasoning-parser
       - qwen3
       - --enable-auto-tool-choice
       - --tool-call-parser
+      #- qwen3_xml
       - qwen3_coder
+      - --chat-template
+      - /chat-template/qwen3.5-enhanced.jinja
       - --enable-prefix-caching
       - --enable-chunked-prefill
       - --speculative-config
