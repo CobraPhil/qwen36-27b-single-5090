@@ -1,4 +1,4 @@
-# Qwen3.6-27B on a single RTX 5090
+# Qwen3.6-27B on a single RTX 5090, 256K context, 160+ TPS
 
 **A validated recipe for serving Qwen3.6-27B on a single 32 GB RTX 5090** — full OpenAI API, vision, tool calling, streaming, speculative decoding, all verified end-to-end via `scripts/verify-full.sh`.
 
