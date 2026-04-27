@@ -26,7 +26,7 @@ services:
       - ../patches/genesis_shim.py:/patches/patch_genesis_unified.py:ro
       - ../patches/genesis:/patches/genesis:ro
       - ../patches/patch_tolist_cudagraph.py:/patches/patch_tolist_cudagraph.py:ro
-      - ~/ai/qwen3.5-enhanced.jinja:/chat-template/qwen3.5-enhanced.jinja:ro
+      - ./qwen3.5-enhanced.jinja:/chat-template/qwen3.5-enhanced.jinja:ro
     environment:
       # Uncomment the next line to pin to a specific GPU (e.g. GPU 0):
       - CUDA_VISIBLE_DEVICES=0

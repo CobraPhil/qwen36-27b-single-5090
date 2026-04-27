@@ -13,7 +13,7 @@ Based on [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwe
 
 - **GPU:** 1× NVIDIA RTX 5090 (32 GB, Blackwell GB202).
 - **Driver:** 580.x or newer (for CUDA 13 runtime in the pinned vLLM image).
-- **Chat template:** `~/ai/qwen3.5-enhanced.jinja` must exist on the host — the compose file bind-mounts it at startup. Obtain it from the repo or provide your own Qwen3-compatible template.
+- **Chat template:** included at `compose/qwen3.5-enhanced.jinja` — mounted automatically by the compose file.
 - **Disk:** ~20 GB free for model weights.
 - **Software:**
   - Docker with NVIDIA Container Toolkit
