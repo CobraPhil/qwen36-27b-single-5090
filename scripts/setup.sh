@@ -46,8 +46,8 @@ if [[ "${SKIP_GENESIS:-0}" != "1" ]]; then
     git clone --depth 1 https://github.com/Sandermage/genesis-vllm-patches.git "${GENESIS_DIR}"
   fi
 
-  if [[ ! -f "${GENESIS_DIR}/patch_genesis_unified.py" ]]; then
-    echo "ERROR: genesis clone succeeded but patch_genesis_unified.py missing." >&2
+  if [[ ! -d "${GENESIS_DIR}/vllm/_genesis" ]]; then
+    echo "ERROR: genesis clone succeeded but vllm/_genesis/ missing." >&2
     exit 1
   fi
 else
