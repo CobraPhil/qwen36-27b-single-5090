@@ -81,11 +81,11 @@ services:
       - --max-model-len
       - "262144"
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.92"
       - --max-num-seqs
       - "1"
       - --max-num-batched-tokens
-      - "4128"
+      - "1024"
       # fp8_e4m3 KV (NOT turboquant — MTP + turboquant collapses on tool-call prompts)
       - --kv-cache-dtype
       - fp8_e4m3
