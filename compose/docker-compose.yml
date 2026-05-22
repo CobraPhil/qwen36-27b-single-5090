@@ -22,8 +22,7 @@ services:
     ports:
       - "8020:8000"
     volumes:
-      - ${MODEL_DIR:-../models}:/root/.cache/huggingface/qwen3.6-27b-autoround-int4
-      - ../patches/genesis_shim.py:/patches/patch_genesis_unified.py:ro
+      - ${MODEL_DIR:-../models/qwen3.6-27b-autoround-int4}:/root/.cache/huggingface/qwen3.6-27b-autoround-int4      - ../patches/genesis_shim.py:/patches/patch_genesis_unified.py:ro
       - ../patches/genesis:/patches/genesis:ro
       - ../patches/patch_tolist_cudagraph.py:/patches/patch_tolist_cudagraph.py:ro
       - ./qwen3.5-enhanced.jinja:/chat-template/qwen3.5-enhanced.jinja:ro
